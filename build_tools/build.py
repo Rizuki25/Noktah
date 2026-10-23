@@ -61,11 +61,20 @@ def main():
         print("BUILD GAGAL (exit %s)" % code)
         return code
 
-    target = os.path.join(DIST, "Noktah.exe")
-    if os.path.exists(target):
-        size = os.path.getsize(target) / (1024 * 1024)
-        print(f"\nOK -> {target}  ({size:.1f} MB)")
+    if args.onedir:
+        target = os.path.join(DIST, "Noktah", "Noktah.exe")
+        total = 0
+        for root, _dirs, files in os.walk(os.path.join(DIST, "Noktah")):
+            for name in files:
+                total += os.path.getsize(os.path.join(root, name))
+        if os.path.exists(target):
+            print(f"\nOK -> {os.path.dirname(target)}  ({total / (1024 * 1024):.1f} MB total)")
     else:
+        target = os.path.join(DIST, "Noktah.exe")
+        if os.path.exists(target):
+            size = os.path.getsize(target) / (1024 * 1024)
+            print(f"\nOK -> {target}  ({size:.1f} MB)")
+    if not os.path.exists(target):
         print("\nSelesai, cek isi dist/")
     return 0
 
