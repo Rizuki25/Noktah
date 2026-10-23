@@ -43,23 +43,13 @@ Ambil dari halaman [Releases](https://github.com/Rizuki25/Noktah/releases):
 
 | File | Untuk |
 | --- | --- |
-| `Noktah-Setup-1.0.0.exe` | Installer Inno Setup: pasang, buat shortcut, bisa autostart, ada uninstaller |
-| `Jalankan-Setup-Noktah.cmd` | Pembungkus installer: memakai folder temp lokal (mengatasi `Error 5` pada `is-*.tmp`) |
+| `Noktah-Setup-1.0.0.exe` | Installer GUI mandiri (tanpa folder `%TEMP%`): pasang ke folder pilihan, buat shortcut, autostart, dan uninstaller (`Uninstall-Noktah.exe`) |
 | `Noktah-1.0.0-win64.zip` | Portable: ekstrak di mana saja, jalankan `Noktah.exe` — atau klik `Install-Noktah.cmd` untuk memasang |
 
-**Cara memasang** (semuanya per-user, tanpa hak admin):
+**Cara memasang**:
 
-1. **`Noktah-Setup-1.0.0.exe`** — cara biasa, ada wizard.
-2. **`Jalankan-Setup-Noktah.cmd`** — kalau nomor 1 gagal dengan
-   `Setup was unable to create the directory is-XXXX.tmp` / `Error 5: Access is
-   denied`. Inno Setup selalu membongkar dirinya ke `%TEMP%` lebih dulu; kalau
-   `%TEMP%` diblokir (antivirus, kebijakan, atau konteks proses terbatas),
-   installer berhenti di langkah pertama. Pembungkus ini mengarahkan `TMP`/`TEMP`
-   ke folder `_setup_tmp` di sebelah file installer.
-3. **`Install-Noktah.cmd`** di dalam ZIP — skrip teks yang menyalin aplikasi ke
-   `%LOCALAPPDATA%\Programs\Noktah`, membuat shortcut Start Menu & Desktop, dan
-   menaruh `Hapus Noktah.cmd`. Tidak memakai Inno Setup dan **tidak butuh folder
-   temp** sama sekali.
+1. **`Noktah-Setup-1.0.0.exe`** — klik dua kali langsung, pilih folder tujuan (default: `%LOCALAPPDATA%\Programs\Noktah` atau lokasi lain seperti `D:\Noktah`), lalu klik **Pasang Sekarang**. Installer ini mengekstrak aplikasi langsung dari memori **tanpa membuat folder sementara (`is-*.tmp`) di `%TEMP%`** serta otomatis meminta elevasi izin (UAC) bila file berada di folder terbatas atau folder tujuan memerlukan izin tulis tambahan, sehingga bebas dari `Error 5: Access is denied`.
+2. **`Install-Noktah.cmd`** di dalam ZIP — alternatif skrip teks yang menyalin aplikasi ke `%LOCALAPPDATA%\Programs\Noktah`, membuat shortcut Start Menu & Desktop, dan menaruh `Hapus Noktah.cmd`.
 
 > Windows SmartScreen mungkin menampilkan "Windows protected your PC" karena
 > exe-nya belum ditandatangani. Klik **More info → Run anyway**.
@@ -88,7 +78,7 @@ Putar lagu di browser dulu, baru jalankan Noktah.
 ```bash
 py -3.10 -m pip install pyinstaller     # sekali saja
 py -3.10 build_tools/build.py --onedir  # hasil: dist/Noktah/Noktah.exe
-py -3.10 build_tools/build_installer.py # hasil: dist/Noktah-Setup-*.exe (perlu Inno Setup 6)
+py -3.10 build_tools/build_installer.py # hasil: dist/Noktah-Setup-*.exe (tanpa Inno Setup)
 ```
 
 Ikon dibuat ulang otomatis lewat `build_tools/make_icon.py` (butuh Pillow).
@@ -130,8 +120,8 @@ run_noktah.bat                # launcher klik-dua-kali
 assets/noktah.ico             # ikon aplikasi
 build_tools/make_icon.py      # generator ikon (.ico + .png)
 build_tools/build.py          # build .exe (onefile/onedir) via PyInstaller
-build_tools/build_installer.py# build installer via Inno Setup
+build_tools/build_installer.py# build installer GUI mandiri (tanpa Inno Setup / tanpa %TEMP%)
+build_tools/SetupProgram.cs   # kode sumber C# installer & uninstaller GUI
 build_tools/noktah.spec       # spec PyInstaller
-build_tools/noktah.iss        # script installer Inno Setup
 docs/                         # tangkapan layar untuk README
 ```
