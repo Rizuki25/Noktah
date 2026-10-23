@@ -3,3 +3,8 @@ __pycache__/
 *.log
 .venv/
 venv/
+
+# hasil build (binary tidak di-commit; pakai GitHub Releases)
+build/
+dist/
+*.spec.bak

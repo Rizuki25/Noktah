@@ -37,7 +37,24 @@ Saat ringkas, Noktah cuma tab kecil berisi sampul + equalizer yang bergerak:
 - Python 3.10
 - Paket: `PySide6` dan `winsdk`
 
-## Menjalankan
+## Download (tanpa Python)
+
+Ambil dari halaman [Releases](https://github.com/Rizuki25/Noktah/releases):
+
+| File | Untuk |
+| --- | --- |
+| `Noktah-Setup-1.0.0.exe` | Installer: pasang, buat shortcut, bisa autostart saat login, ada uninstaller |
+| `Noktah-1.0.0-win64.zip` | Portable: ekstrak di mana saja, jalankan `Noktah.exe` |
+
+Installer tidak butuh hak admin (dipasang per-user di
+`%LOCALAPPDATA%\Programs\Noktah`).
+
+> Windows SmartScreen mungkin menampilkan "Windows protected your PC" karena
+> exe-nya belum ditandatangani. Klik **More info → Run anyway**.
+
+## Menjalankan dari source
+
+Kebutuhan: Windows 10/11, Python 3.10, paket `PySide6` dan `winsdk`.
 
 ```bash
 git clone https://github.com/Rizuki25/Noktah.git
@@ -53,6 +70,16 @@ Putar lagu di browser dulu, baru jalankan Noktah.
 
 > Kalau `python noktah.py` gagal dengan `ModuleNotFoundError`, itu karena
 > `python` di PATH menunjuk ke venv proyek lain. Pakai `py -3.10 noktah.py`.
+
+## Build .exe sendiri
+
+```bash
+py -3.10 -m pip install pyinstaller     # sekali saja
+py -3.10 build_tools/build.py --onedir  # hasil: dist/Noktah/Noktah.exe
+py -3.10 build_tools/build_installer.py # hasil: dist/Noktah-Setup-*.exe (perlu Inno Setup 6)
+```
+
+Ikon dibuat ulang otomatis lewat `build_tools/make_icon.py` (butuh Pillow).
 
 ## Kontrol
 
@@ -86,7 +113,13 @@ menahan render; area transparan di luar panel dibuat tembus klik lewat
 ## Struktur
 
 ```
-noktah.py        # seluruh aplikasi (bridge SMTC + UI)
-run_noktah.bat   # launcher klik-dua-kali
-docs/            # tangkapan layar untuk README
+noktah.py                     # seluruh aplikasi (bridge SMTC + UI)
+run_noktah.bat                # launcher klik-dua-kali
+assets/noktah.ico             # ikon aplikasi
+build_tools/make_icon.py      # generator ikon (.ico + .png)
+build_tools/build.py          # build .exe (onefile/onedir) via PyInstaller
+build_tools/build_installer.py# build installer via Inno Setup
+build_tools/noktah.spec       # spec PyInstaller
+build_tools/noktah.iss        # script installer Inno Setup
+docs/                         # tangkapan layar untuk README
 ```
