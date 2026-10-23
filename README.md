@@ -1,0 +1,92 @@
+# Noktah
+
+> Notch pemutar musik untuk Windows yang menempel di tepi atas layar.
+
+Panel hitam kecil yang menggantung di atas layar Anda dan menunjukkan lagu yang
+sedang diputar — lengkap dengan sampul album, judul, artis, jam, bilah progres,
+dan tombol kontrol. Saat tidak dipakai ia menyusut jadi tab mungil; saat disorot
+(atau saat lagu berganti) ia turun membesar dengan animasi pegas.
+
+![Tampilan Noktah](docs/preview.png)
+
+Saat ringkas, Noktah cuma tab kecil berisi sampul + equalizer yang bergerak:
+
+![Tampilan ringkas](docs/preview-ringkas.png)
+
+## Fitur
+
+- **Menempel di tepi atas layar** — sudut atas menyatu dengan tepi layar, sudut
+  bawah membulat, dengan lekuk halus di kedua ujungnya.
+- **Animasi pegas** (spring), bukan animasi linear — membesar/menyusut terasa
+  hidup, dengan sedikit overshoot seperti Dynamic Island.
+- **Konten lengkap**: sampul album, judul, artis, tanggal & jam, bilah progres
+  dengan waktu berjalan dan sisa waktu, serta dock tombol prev / play-pause /
+  next.
+- **Warna aksen otomatis** — glow, equalizer, dan bilah progres mengambil warna
+  dari sampul album; kalau sampulnya hitam-putih, dipakai warna khas per lagu.
+- **Tanpa API key** — membaca Windows Media Session (SMTC), jalur resmi yang
+  sama dipakai tombol media di keyboard. Bekerja dengan YouTube Music/YouTube di
+  Edge/Chrome, Spotify Web, dan pemutar lain yang mendukung SMTC.
+- **Seek dari bilah progres**, geser panel, klik tembus di area transparan.
+- **Ringan**: jendela tidak pernah di-resize saat animasi, hanya area yang
+  berubah yang digambar ulang (~7% CPU saat memutar lagu pada 60 fps).
+
+## Kebutuhan
+
+- Windows 10 / 11
+- Python 3.10
+- Paket: `PySide6` dan `winsdk`
+
+## Menjalankan
+
+```bash
+git clone https://github.com/Rizuki25/Noktah.git
+cd Noktah
+py -3.10 -m pip install PySide6 winsdk
+py -3.10 noktah.py
+```
+
+Atau klik dua kali `run_noktah.bat` (menjalankan tanpa jendela terminal dan
+mengecek dependensinya lebih dulu).
+
+Putar lagu di browser dulu, baru jalankan Noktah.
+
+> Kalau `python noktah.py` gagal dengan `ModuleNotFoundError`, itu karena
+> `python` di PATH menunjuk ke venv proyek lain. Pakai `py -3.10 noktah.py`.
+
+## Kontrol
+
+| Aksi | Fungsi |
+| --- | --- |
+| Sorot panel | membesar (expanded) |
+| Klik saat ringkas | play / pause |
+| Seret | geser panel; dilepas akan menempel lagi ke tepi atas |
+| Klik / geser bilah progres | lompat ke posisi tersebut |
+| Klik kanan | menu **Keluar** / **Tempel ke atas (tengah)** |
+| Spasi / ← / → | play-pause / prev / next (saat panel terfokus) |
+| Esc | keluar |
+
+## Cara kerja
+
+`noktah.py` terdiri dari dua bagian:
+
+1. **`MediaBridge`** — thread asyncio yang membaca
+   `GlobalSystemMediaTransportControlsSessionManager` (SMTC) tiap detik:
+   judul, artis, status, posisi, durasi, dan sampul album. Perintah tombol dan
+   seek dikirim balik lewat antrean ke sesi media yang sama.
+2. **`Notch`** — widget PySide6 tanpa bingkai yang digambar manual dengan
+   `QPainter`. Semua posisi diturunkan dari satu nilai pegas `0..1` (ringkas →
+   membesar), jadi lebar, tinggi, radius, ukuran sampul, dan tata letak
+   bergerak mulus bersama-sama.
+
+Jendela berukuran tetap (tidak di-resize saat animasi) supaya Windows tidak
+menahan render; area transparan di luar panel dibuat tembus klik lewat
+`WM_NCHITTEST → HTTRANSPARENT`.
+
+## Struktur
+
+```
+noktah.py        # seluruh aplikasi (bridge SMTC + UI)
+run_noktah.bat   # launcher klik-dua-kali
+docs/            # tangkapan layar untuk README
+```
