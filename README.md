@@ -43,11 +43,18 @@ Ambil dari halaman [Releases](https://github.com/Rizuki25/Noktah/releases):
 
 | File | Untuk |
 | --- | --- |
-| `Noktah-Setup-1.0.0.exe` | Installer: pasang, buat shortcut, bisa autostart saat login, ada uninstaller |
-| `Noktah-1.0.0-win64.zip` | Portable: ekstrak di mana saja, jalankan `Noktah.exe` |
+| `Noktah-Setup-1.0.0.exe` | Installer Inno Setup: pasang, buat shortcut, bisa autostart, ada uninstaller |
+| `Noktah-1.0.0-win64.zip` | Portable: ekstrak di mana saja, jalankan `Noktah.exe` — atau klik `Install-Noktah.cmd` untuk memasang |
 
-Installer tidak butuh hak admin (dipasang per-user di
-`%LOCALAPPDATA%\Programs\Noktah`).
+**Dua cara memasang** (keduanya per-user, tanpa hak admin):
+
+1. **`Noktah-Setup-1.0.0.exe`** — cara biasa, ada wizard.
+2. **`Install-Noktah.cmd`** di dalam ZIP — skrip teks yang menyalin aplikasi ke
+   `%LOCALAPPDATA%\Programs\Noktah`, membuat shortcut Start Menu & Desktop,
+   dan menaruh `Hapus Noktah.cmd` untuk membongkarnya. Tidak memakai Inno
+   Setup dan **tidak butuh folder temp**, jadi berguna kalau installer .exe
+   gagal di mesin Anda (mis. `Error 5: Access is denied` saat membuat
+   `is-*.tmp`).
 
 > Windows SmartScreen mungkin menampilkan "Windows protected your PC" karena
 > exe-nya belum ditandatangani. Klik **More info → Run anyway**.

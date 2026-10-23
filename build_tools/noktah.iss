@@ -16,9 +16,10 @@ AppPublisher={#AppPublisher}
 AppPublisherURL={#AppURL}
 AppSupportURL={#AppURL}
 AppUpdatesURL={#AppURL}
-DefaultDirName={autopf}\{#AppName}
+DefaultDirName={localappdata}\Programs\{#AppName}
 DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
+DisableDirPage=no
 LicenseFile=
 OutputDir=..\dist
 OutputBaseFilename=Noktah-Setup-{#AppVersion}
@@ -29,10 +30,10 @@ Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
 ArchitecturesAllowed=x64compatible
-ArchitecturesInstallIn64BitMode=x64compatible
 MinVersion=10.0
+; per-user saja: tidak perlu hak admin, dan tidak ada dialog "semua pengguna"
+; yang bisa berujung gagal dengan Error 5 kalau UAC tidak lolos.
 PrivilegesRequired=lowest
-PrivilegesRequiredOverridesAllowed=dialog
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
