@@ -44,17 +44,22 @@ Ambil dari halaman [Releases](https://github.com/Rizuki25/Noktah/releases):
 | File | Untuk |
 | --- | --- |
 | `Noktah-Setup-1.0.0.exe` | Installer Inno Setup: pasang, buat shortcut, bisa autostart, ada uninstaller |
+| `Jalankan-Setup-Noktah.cmd` | Pembungkus installer: memakai folder temp lokal (mengatasi `Error 5` pada `is-*.tmp`) |
 | `Noktah-1.0.0-win64.zip` | Portable: ekstrak di mana saja, jalankan `Noktah.exe` — atau klik `Install-Noktah.cmd` untuk memasang |
 
-**Dua cara memasang** (keduanya per-user, tanpa hak admin):
+**Cara memasang** (semuanya per-user, tanpa hak admin):
 
 1. **`Noktah-Setup-1.0.0.exe`** — cara biasa, ada wizard.
-2. **`Install-Noktah.cmd`** di dalam ZIP — skrip teks yang menyalin aplikasi ke
-   `%LOCALAPPDATA%\Programs\Noktah`, membuat shortcut Start Menu & Desktop,
-   dan menaruh `Hapus Noktah.cmd` untuk membongkarnya. Tidak memakai Inno
-   Setup dan **tidak butuh folder temp**, jadi berguna kalau installer .exe
-   gagal di mesin Anda (mis. `Error 5: Access is denied` saat membuat
-   `is-*.tmp`).
+2. **`Jalankan-Setup-Noktah.cmd`** — kalau nomor 1 gagal dengan
+   `Setup was unable to create the directory is-XXXX.tmp` / `Error 5: Access is
+   denied`. Inno Setup selalu membongkar dirinya ke `%TEMP%` lebih dulu; kalau
+   `%TEMP%` diblokir (antivirus, kebijakan, atau konteks proses terbatas),
+   installer berhenti di langkah pertama. Pembungkus ini mengarahkan `TMP`/`TEMP`
+   ke folder `_setup_tmp` di sebelah file installer.
+3. **`Install-Noktah.cmd`** di dalam ZIP — skrip teks yang menyalin aplikasi ke
+   `%LOCALAPPDATA%\Programs\Noktah`, membuat shortcut Start Menu & Desktop, dan
+   menaruh `Hapus Noktah.cmd`. Tidak memakai Inno Setup dan **tidak butuh folder
+   temp** sama sekali.
 
 > Windows SmartScreen mungkin menampilkan "Windows protected your PC" karena
 > exe-nya belum ditandatangani. Klik **More info → Run anyway**.
