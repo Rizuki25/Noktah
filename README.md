@@ -7,11 +7,26 @@ sedang diputar — lengkap dengan sampul album, judul, artis, jam, bilah progres
 dan tombol kontrol. Saat tidak dipakai ia menyusut jadi tab mungil; saat disorot
 (atau saat lagu berganti) ia turun membesar dengan animasi pegas.
 
+Di header ada ikon baterai sungguhan, dan di ujung kanan panel menyala titik
+oranye/hijau begitu ada aplikasi yang memakai mikrofon atau kamera — seperti
+indikator privasi di iPhone.
+
 ![Tampilan Noktah](docs/preview.png)
 
 Saat ringkas, Noktah cuma tab kecil berisi sampul + equalizer yang bergerak:
 
 ![Tampilan ringkas](docs/preview-ringkas.png)
+
+Kalau ada aplikasi yang sedang memakai mikrofon atau kamera, muncul titik
+oranye/hijau di ujung kanan panel — dan nama aplikasinya begitu panel membesar:
+
+![Indikator mic/kamera](docs/preview-privasi.png)
+
+Ikon baterai di header menunjukkan sisa daya sebenarnya. Tiap charger dicolok,
+pil berdenyut hijau sebentar; kalau baterai tinggal 15%, badge berganti jadi
+peringatan:
+
+![Baterai & charger](docs/preview-baterai.png)
 
 ## Fitur
 
@@ -19,14 +34,27 @@ Saat ringkas, Noktah cuma tab kecil berisi sampul + equalizer yang bergerak:
   bawah membulat, dengan lekuk halus di kedua ujungnya.
 - **Animasi pegas** (spring), bukan animasi linear — membesar/menyusut terasa
   hidup, dengan sedikit overshoot seperti Dynamic Island.
-- **Konten lengkap**: sampul album, judul, artis, tanggal & jam, bilah progres
-  dengan waktu berjalan dan sisa waktu, serta dock tombol prev / play-pause /
-  next.
+- **Konten lengkap**: sampul album, judul, artis, tanggal & jam, ikon baterai,
+  bilah progres dengan waktu berjalan dan sisa waktu, serta dock tombol prev /
+  play-pause / next.
 - **Warna aksen otomatis** — glow, equalizer, dan bilah progres mengambil warna
   dari sampul album; kalau sampulnya hitam-putih, dipakai warna khas per lagu.
 - **Tanpa API key** — membaca Windows Media Session (SMTC), jalur resmi yang
   sama dipakai tombol media di keyboard. Bekerja dengan YouTube Music/YouTube di
   Edge/Chrome, Spotify Web, dan pemutar lain yang mendukung SMTC.
+- **Indikator mic/kamera aktif** — titik oranye (mikrofon) dan hijau (kamera)
+  seperti di iPhone, selalu kelihatan termasuk saat panel ringkas. Saat panel
+  membesar, muncul nama aplikasi yang memakainya (mis. `Chrome`, `Teams`).
+  Dibaca langsung dari registry
+  `CapabilityAccessManager\ConsentStore` (`LastUsedTimeStop = 0` berarti sedang
+  dipakai), jadi tanpa driver, tanpa izin admin, dan tanpa akses ke perangkat.
+  Bisa dimatikan lewat klik kanan → **Indikator mic/kamera**.
+- **Ikon baterai & charger** — ikon baterai sungguhan di header: isinya
+  mengikuti persen, warnanya ivory → kuning → merah, dan ada petir saat
+  dicolok. Begitu charger masuk, pil berdenyut hijau ±4 detik lalu menyisakan
+  glow tipis. Kalau baterai ≤ 15% dan tidak dicolok, panel membesar sebentar
+  dan badge menampilkan **"Baterai lemah 15%"**. Datanya dari
+  `GetSystemPowerStatus` (tanpa psutil), dibaca 3 detik sekali.
 - **Seek dari bilah progres**, geser panel, klik tembus di area transparan.
 - **Ringan**: jendela tidak pernah di-resize saat animasi, hanya area yang
   berubah yang digambar ulang (~7% CPU saat memutar lagu pada 60 fps).
@@ -91,13 +119,13 @@ Ikon dibuat ulang otomatis lewat `build_tools/make_icon.py` (butuh Pillow).
 | Klik saat ringkas | play / pause |
 | Seret | geser panel; dilepas akan menempel lagi ke tepi atas |
 | Klik / geser bilah progres | lompat ke posisi tersebut |
-| Klik kanan | menu **Keluar** / **Tempel ke atas (tengah)** |
+| Klik kanan | menu **Keluar** / **Tempel ke atas (tengah)** / **Indikator mic/kamera** |
 | Spasi / ← / → | play-pause / prev / next (saat panel terfokus) |
 | Esc | keluar |
 
 ## Cara kerja
 
-`noktah.py` terdiri dari dua bagian:
+`noktah.py` terdiri dari tiga bagian:
 
 1. **`MediaBridge`** — thread asyncio yang membaca
    `GlobalSystemMediaTransportControlsSessionManager` (SMTC) tiap detik:
@@ -107,6 +135,18 @@ Ikon dibuat ulang otomatis lewat `build_tools/make_icon.py` (butuh Pillow).
    `QPainter`. Semua posisi diturunkan dari satu nilai pegas `0..1` (ringkas →
    membesar), jadi lebar, tinggi, radius, ukuran sampul, dan tata letak
    bergerak mulus bersama-sama.
+3. **`PrivacyWatcher`** — thread kecil yang tiap 0,75 detik membaca
+   `HKCU\...\CapabilityAccessManager\ConsentStore\{microphone,webcam}`. Aplikasi
+   yang sedang memakai perangkat punya `LastUsedTimeStop = 0`; namanya diambil
+   dari nama kunci (path `.exe` untuk aplikasi biasa, `PackageFamilyName` untuk
+   aplikasi Store). Supaya tidak nyala palsu, entri `NonPackaged` diverifikasi
+   dulu ke daftar proses hidup — aplikasi yang crash memang kadang meninggalkan
+   `LastUsedTimeStop = 0` selamanya.
+
+Soal daya, `GetSystemPowerStatus` dipanggil tiap 3 detik (satu panggilan murah,
+tanpa paket tambahan). Denyut hijau sengaja hanya berjalan ±4 detik: setelah itu
+glow-nya menetap tipis, jadi tidak ada repaint 20 fps yang jalan terus selama
+laptop dicolok.
 
 Jendela berukuran tetap (tidak di-resize saat animasi) supaya Windows tidak
 menahan render; area transparan di luar panel dibuat tembus klik lewat
@@ -115,7 +155,7 @@ menahan render; area transparan di luar panel dibuat tembus klik lewat
 ## Struktur
 
 ```
-noktah.py                     # seluruh aplikasi (bridge SMTC + UI)
+noktah.py                     # seluruh aplikasi (bridge SMTC + indikator privasi/baterai + UI)
 run_noktah.bat                # launcher klik-dua-kali
 assets/noktah.ico             # ikon aplikasi
 build_tools/make_icon.py      # generator ikon (.ico + .png)

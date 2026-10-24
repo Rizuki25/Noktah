@@ -11,6 +11,14 @@
 # prev / play-pause / next. Warna aksen (glow, equalizer, progres) diambil
 # dari sampul album yang sedang diputar.
 #
+# Indikator privasi: titik oranye (mikrofon) / hijau (kamera) seperti di
+# iPhone, selalu kelihatan walau panel ringkas. Nama aplikasi yang sedang
+# memakai perangkat dibaca dari registry CapabilityAccessManager.
+#
+# Baterai: ikon baterai sungguhan di header (isinya mengikuti persen), pil
+# berdenyut hijau sebentar saat charger dicolok, dan badge berganti jadi
+# peringatan saat baterai tinggal <= 15% — semuanya dari GetSystemPowerStatus.
+#
 # Persiapan (sekali saja):
 #   py -3.10 -m pip install PySide6 winsdk
 #
@@ -23,7 +31,7 @@
 #   klik kiri (ringkas)-> play / pause
 #   seret              -> geser; dilepas -> menempel lagi ke tepi atas
 #   klik bilah progres -> lompat ke posisi itu
-#   klik kanan         -> menu Keluar / Tempel ke atas
+#   klik kanan         -> menu Keluar / Tempel ke atas / Indikator mic-kamera
 #   Spasi / <- / ->    -> play-pause / prev / next (saat notch terfokus)
 #   Esc                -> keluar
 
@@ -32,17 +40,24 @@ import ctypes
 from ctypes import wintypes
 import hashlib
 import math
+import os
 import queue
 import sys
 import threading
 import time
 from datetime import datetime, timedelta, timezone
 
+try:  # hanya ada di Windows; dijaga supaya modul tetap bisa diimpor saat uji
+    import winreg
+except ImportError:  # pragma: no cover
+    winreg = None
+
 from PySide6.QtCore import (
     QAbstractNativeEventFilter,
     QObject,
     QPointF,
     QRectF,
+    QSettings,
     Qt,
     QTimer,
     Signal,
@@ -90,6 +105,22 @@ WIN_W = EXPANDED_W + 2 * MARGIN
 WIN_H = EXPANDED_H + MARGIN
 
 ACCENT_FALLBACK = QColor(218, 168, 118)
+
+# --- Indikator mic/kamera: titik oranye & hijau ala iPhone ---
+MIC_COLOR = QColor(255, 159, 10)   # oranye: mikrofon sedang dipakai
+CAM_COLOR = QColor(48, 209, 88)    # hijau: kamera sedang dipakai
+PRIVACY_POLL_SEC = 0.75            # jeda antar pembacaan registry
+
+# --- Baterai: ikon asli di header, denyut hijau saat charger dicolok ---
+BATTERY_POLL_MS = 3000     # GetSystemPowerStatus murah; 3 detik sudah cukup
+BATTERY_LOW = 15           # persen: di bawah/nyampe ini muncul peringatan
+BATTERY_WARN_SEC = 12.0    # lama teks peringatan menempati badge
+CHARGE_PULSE_SEC = 4.0     # lama pil berdenyut hijau setelah charger dicolok
+
+CHARGE_COLOR = QColor(48, 209, 88)
+LOW_COLOR = QColor(255, 69, 58)
+MID_COLOR = QColor(255, 176, 32)
+BATT_LEVEL_COLOR = QColor(226, 205, 180)
 
 
 # ---------------------------------------------------------------- utilitas --
@@ -351,6 +382,361 @@ class MediaBridge(QObject):
             return None
 
 
+# ------------------------------------------------------------------ privasi --
+# Windows mencatat setiap pemakaian mikrofon/kamera di CapabilityAccessManager.
+# Per aplikasi ada dua nilai QWORD: LastUsedTimeStart (kapan mulai dipakai) dan
+# LastUsedTimeStop (kapan selesai). Selama perangkat MASIH dipakai,
+# LastUsedTimeStop = 0 — itu penanda "sedang aktif" yang sama dipakai panel
+# Settings > Privacy. Nama kuncinya = aplikasi yang memakainya.
+_CONSENT_KEY = (
+    r"Software\Microsoft\Windows\CurrentVersion"
+    r"\CapabilityAccessManager\ConsentStore"
+)
+_PRIVACY_DEVICES = (("mic", "microphone"), ("cam", "webcam"))
+
+# Nama tampilan untuk aplikasi paket (MSIX/UWP). Kunci registry memakai
+# PackageFamilyName, mis. "Microsoft.WindowsCamera_8wekyb3d8bbwe".
+_PACKAGED_NAMES = {
+    "microsoft.windowscamera": "Camera",
+    "microsoft.screensketch": "Snipping Tool",
+    "microsoft.windowssoundrecorder": "Sound Recorder",
+    "microsoftteams": "Teams",
+    "msteams": "Teams",
+    "clipchamp.clipchamp": "Clipchamp",
+    "microsoft.xboxgamingoverlay": "Xbox Game Bar",
+    "microsoft.gamingapp": "Xbox",
+    "microsoft.microsoftofficehub": "Office",
+    "microsoft.zunemusic": "Media Player",
+    "microsoft.windowscommunicationsapps": "Mail",
+    "microsoft.skypeapp": "Skype",
+    "microsoft.yourphone": "Phone Link",
+    "microsoft.windowsstore": "Store",
+    "windows.immersivecontrolpanel": "Settings",
+    "starbyteapps.webcamcapture": "Webcam Capture",
+    "ad2f1837.hpprintercontrol": "HP Printer",
+}
+
+# Nama tampilan untuk aplikasi biasa (kunci NonPackaged berupa path exe).
+_EXE_NAMES = {
+    "chrome": "Chrome",
+    "msedge": "Edge",
+    "firefox": "Firefox",
+    "brave": "Brave",
+    "opera": "Opera",
+    "vivaldi": "Vivaldi",
+    "discord": "Discord",
+    "zoom": "Zoom",
+    "teams": "Teams",
+    "ms-teams": "Teams",
+    "obs64": "OBS",
+    "obs32": "OBS",
+    "obs": "OBS",
+    "audacity": "Audacity",
+    "python": "Python",
+    "pythonw": "Python",
+    "python3": "Python",
+    "code": "VS Code",
+    "spotify": "Spotify",
+    "slack": "Slack",
+    "webex": "Webex",
+    "webexmta": "Webex",
+    "skype": "Skype",
+    "steam": "Steam",
+    "vlc": "VLC",
+    "noktah": "Noktah",
+}
+
+
+def _packaged_label(key_name):
+    family = key_name.split("_")[0]
+    return _PACKAGED_NAMES.get(family.lower()) or family.rsplit(".", 1)[-1]
+
+
+def _exe_label(path):
+    base = path.replace("/", "\\").rsplit("\\", 1)[-1]
+    stem = base.rsplit(".", 1)[0] if "." in base else base
+    label = _EXE_NAMES.get(stem.lower())
+    if label:
+        return label
+    label = stem.replace("_", " ").strip()
+    return label[:1].upper() + label[1:] if label else "Aplikasi"
+
+
+# --- pemeriksaan proses: registry bisa menyimpan entri "hantu" ---
+# Aplikasi yang mati mendadak (crash / task manager) kadang meninggalkan
+# LastUsedTimeStop = 0 selamanya. Tanpa verifikasi, titiknya menyala terus.
+_TH32CS_SNAPPROCESS = 0x00000002
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+
+
+class _PROCESSENTRY32W(ctypes.Structure):
+    _fields_ = [
+        ("dwSize", wintypes.DWORD),
+        ("cntUsage", wintypes.DWORD),
+        ("th32ProcessID", wintypes.DWORD),
+        ("th32DefaultHeapID", ctypes.c_size_t),
+        ("th32ModuleID", wintypes.DWORD),
+        ("cntThreads", wintypes.DWORD),
+        ("th32ParentProcessID", wintypes.DWORD),
+        ("pcPriClassBase", ctypes.c_long),
+        ("dwFlags", wintypes.DWORD),
+        ("szExeFile", ctypes.c_wchar * 260),
+    ]
+
+
+def _load_kernel32():
+    try:
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+        k32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+        k32.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(_PROCESSENTRY32W)]
+        k32.Process32FirstW.restype = wintypes.BOOL
+        k32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(_PROCESSENTRY32W)]
+        k32.Process32NextW.restype = wintypes.BOOL
+        k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        k32.OpenProcess.restype = wintypes.HANDLE
+        k32.QueryFullProcessImageNameW.argtypes = [
+            wintypes.HANDLE,
+            wintypes.DWORD,
+            wintypes.LPWSTR,
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        k32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+        k32.CloseHandle.argtypes = [wintypes.HANDLE]
+        k32.CloseHandle.restype = wintypes.BOOL
+        return k32
+    except Exception:  # pragma: no cover
+        return None
+
+
+_K32 = _load_kernel32()
+
+
+def _image_pids():
+    """{nama exe huruf kecil: [pid]} — sekali per pembacaan registry."""
+    if _K32 is None:
+        return None
+    pids = {}
+    snap = _K32.CreateToolhelp32Snapshot(_TH32CS_SNAPPROCESS, 0)
+    if not snap or int(snap) == -1:
+        return None
+    try:
+        entry = _PROCESSENTRY32W()
+        entry.dwSize = ctypes.sizeof(_PROCESSENTRY32W)
+        ok = _K32.Process32FirstW(snap, ctypes.byref(entry))
+        while ok:
+            name = (entry.szExeFile or "").lower()
+            pids.setdefault(name, []).append(int(entry.th32ProcessID))
+            ok = _K32.Process32NextW(snap, ctypes.byref(entry))
+    except Exception:
+        return None
+    finally:
+        _K32.CloseHandle(snap)
+    return pids
+
+
+def _process_path(pid):
+    """Path lengkap sebuah proses, atau None kalau tidak bisa dibaca."""
+    if _K32 is None:
+        return None
+    handle = _K32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return None
+    try:
+        buf = ctypes.create_unicode_buffer(1024)
+        size = wintypes.DWORD(len(buf))
+        if not _K32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
+            return None
+        return buf.value or None
+    finally:
+        _K32.CloseHandle(handle)
+
+
+_EXE_CACHE = {}
+
+
+def _path_exists(path):
+    hit = _EXE_CACHE.get(path)
+    if hit is None:
+        try:
+            hit = os.path.exists(path)
+        except OSError:
+            hit = False
+        if len(_EXE_CACHE) > 512:
+            _EXE_CACHE.clear()
+        _EXE_CACHE[path] = hit
+    return hit
+
+
+def _exe_still_running(key_name, running):
+    """Apakah exe di balik entri NonPackaged benar-benar masih hidup."""
+    exe = key_name.replace("#", "\\")
+    if not _path_exists(exe):
+        return False
+    if running is None:  # snapshot proses gagal: percayai registry
+        return True
+    pids = running.get(exe.rsplit("\\", 1)[-1].lower())
+    if not pids:
+        return False
+    unreadable = False
+    for pid in pids:
+        path = _process_path(pid)
+        if path is None:
+            unreadable = True
+            continue
+        if os.path.normcase(path) == os.path.normcase(exe):
+            return True
+    # Proses berjalan sebagai admin / tak terbaca: percayai nama exe-nya
+    return unreadable
+
+
+def _in_use(parent, name):
+    try:
+        with winreg.OpenKey(parent, name) as sub:
+            start = int(winreg.QueryValueEx(sub, "LastUsedTimeStart")[0])
+            stop = int(winreg.QueryValueEx(sub, "LastUsedTimeStop")[0])
+    except (OSError, ValueError, TypeError):
+        return False
+    return start > 0 and stop == 0
+
+
+def _active_apps(device, running):
+    root_path = _CONSENT_KEY + "\\" + device
+    found = []
+    try:
+        root = winreg.OpenKey(winreg.HKEY_CURRENT_USER, root_path)
+    except OSError:
+        return found
+    try:
+        for i in range(winreg.QueryInfoKey(root)[0]):
+            try:
+                child = winreg.EnumKey(root, i)
+            except OSError:
+                break
+            if child.lower() == "nonpackaged":
+                continue
+            if not _in_use(root, child):
+                continue
+            if "#" in child or ":" in child:
+                # Windows 10 lama menaruh path exe langsung di bawah kunci
+                # perangkat, bukan di subkunci NonPackaged.
+                if _exe_still_running(child, running):
+                    found.append(_exe_label(child.replace("#", "\\")))
+            else:
+                found.append(_packaged_label(child))
+    except OSError:
+        pass
+    finally:
+        root.Close()
+
+    try:
+        packed = winreg.OpenKey(winreg.HKEY_CURRENT_USER, root_path + r"\NonPackaged")
+    except OSError:
+        return found
+    try:
+        for i in range(winreg.QueryInfoKey(packed)[0]):
+            try:
+                child = winreg.EnumKey(packed, i)
+            except OSError:
+                break
+            if _in_use(packed, child) and _exe_still_running(child, running):
+                found.append(_exe_label(child.replace("#", "\\")))
+    except OSError:
+        pass
+    finally:
+        packed.Close()
+    return found
+
+
+def read_privacy_state():
+    """{"mic": [nama app], "cam": [nama app]} — kosong kalau tidak dipakai."""
+    state = {"mic": [], "cam": []}
+    if winreg is None:
+        return state
+    running = _image_pids()
+    for key, device in _PRIVACY_DEVICES:
+        try:
+            state[key] = sorted(set(_active_apps(device, running)))
+        except Exception:
+            state[key] = []
+    return state
+
+
+class PrivacyWatcher(QObject):
+    """Membaca pemakaian mic/kamera di thread sendiri, lapor saat berubah."""
+
+    changed = Signal(dict)
+
+    def __init__(self, interval=PRIVACY_POLL_SEC):
+        super().__init__()
+        self._interval = max(0.15, float(interval))
+        self._enabled = True
+        self._stop = threading.Event()
+        self._last = None
+
+    def start(self):
+        threading.Thread(target=self._loop, daemon=True).start()
+        return self
+
+    def stop(self):
+        self._stop.set()
+
+    def set_enabled(self, enabled):
+        self._enabled = bool(enabled)
+        if not self._enabled:
+            self._publish({"mic": [], "cam": []})
+
+    def _publish(self, state):
+        signature = (tuple(state["mic"]), tuple(state["cam"]))
+        if signature == self._last:
+            return
+        self._last = signature
+        self.changed.emit(state)
+
+    def _loop(self):
+        while not self._stop.is_set():
+            if self._enabled:
+                try:
+                    self._publish(read_privacy_state())
+                except Exception:
+                    pass
+            self._stop.wait(self._interval)
+
+
+# -------------------------------------------------------------------- daya --
+# GetSystemPowerStatus sudah cukup untuk tahu persen, status colokan, dan
+# apakah sedang mengisi — tanpa paket tambahan seperti psutil.
+class _SYSTEM_POWER_STATUS(ctypes.Structure):
+    _fields_ = [
+        ("ACLineStatus", wintypes.BYTE),
+        ("BatteryFlag", wintypes.BYTE),
+        ("BatteryLifePercent", wintypes.BYTE),
+        ("SystemStatusFlag", wintypes.BYTE),
+        ("BatteryLifeTime", wintypes.DWORD),
+        ("BatteryFullLifeTime", wintypes.DWORD),
+    ]
+
+
+def read_power_status():
+    """{'percent', 'plugged', 'charging', 'present'} atau None kalau gagal."""
+    try:
+        status = _SYSTEM_POWER_STATUS()
+        if not ctypes.windll.kernel32.GetSystemPowerStatus(ctypes.byref(status)):
+            return None
+    except Exception:
+        return None
+    flags = int(status.BatteryFlag)
+    percent = int(status.BatteryLifePercent)
+    if percent > 100:  # 255 = tidak diketahui
+        percent = None
+    return {
+        "percent": percent,
+        "plugged": int(status.ACLineStatus) == 1,
+        "charging": bool(flags & 0x08),
+        "present": percent is not None and not (flags & 0x80),
+    }
+
+
 # -------------------------------------------------------------------- notch --
 WM_NCHITTEST = 0x0084
 HTTRANSPARENT = -1
@@ -472,6 +858,35 @@ class Notch(QWidget):
         self._peek_timer.timeout.connect(self._collapse_if_idle)
 
         self.bridge.updated.connect(self.on_update)
+
+        # --- indikator mic/kamera ---
+        self._privacy = {"mic": [], "cam": []}
+        self._privacy_anim = Spring(0.0, k=300.0, c=26.0)
+        self._settings = None
+        self._privacy_on = True
+        try:
+            self._settings = QSettings("Noktah", "Noktah")
+            self._privacy_on = bool(
+                self._settings.value("indikator_privasi", True, type=bool)
+            )
+        except Exception:
+            self._settings = None
+        self._watch = PrivacyWatcher()
+        self._watch.changed.connect(self.on_privacy)
+        self._watch.set_enabled(self._privacy_on)
+        self._watch.start()
+
+        # --- baterai ---
+        self._power = None
+        self._pulse_t = 0.0        # sisa detik denyut (hijau saat charger / merah saat low)
+        self._pulse_phase = 0.0
+        self._warn_t = 0.0         # sisa detik teks "Baterai lemah"
+        self._warn_low = False     # sudah diperingatkan pada siklus pengosongan ini
+        self._power_timer = QTimer(self)
+        self._power_timer.setInterval(BATTERY_POLL_MS)
+        self._power_timer.timeout.connect(self._poll_power)
+        self._power_timer.start()
+        self._poll_power()
 
         # filter klik-tembus; disimpan di atribut supaya tidak di-GC
         self._hit_filter = ClickThroughFilter(self)
@@ -669,6 +1084,110 @@ class Notch(QWidget):
         except Exception:
             return QColor(ACCENT_FALLBACK)
 
+    # -------------------------------------------------------------- privasi ---
+    def on_privacy(self, state):
+        mic = list(state.get("mic") or [])
+        cam = list(state.get("cam") or [])
+        if mic == self._privacy.get("mic") and cam == self._privacy.get("cam"):
+            return
+        self._privacy = {"mic": mic, "cam": cam}
+        self._privacy_anim.target = 1.0 if (mic or cam) else 0.0
+        self._wake()
+        self.update()
+
+    def _privacy_items(self):
+        """Gabungkan per nama aplikasi: satu app bisa memakai mic & kamera."""
+        items, by_name = [], {}
+        for device, names in (
+            ("mic", self._privacy.get("mic", [])),
+            ("cam", self._privacy.get("cam", [])),
+        ):
+            for name in names:
+                item = by_name.get(name)
+                if item is None:
+                    item = {"name": name, "devices": []}
+                    by_name[name] = item
+                    items.append(item)
+                if device not in item["devices"]:
+                    item["devices"].append(device)
+        return items[:2]  # dua aplikasi sudah lebih dari cukup untuk satu badge
+
+    def _save_privacy_flag(self):
+        try:
+            if self._settings is not None:
+                self._settings.setValue("indikator_privasi", bool(self._privacy_on))
+        except Exception:
+            pass
+
+    # ---------------------------------------------------------------- daya ---
+    def _poll_power(self):
+        power = read_power_status()
+        if power != self._power:
+            self.on_power(power)
+
+    def on_power(self, power):
+        prev = self._power
+        self._power = power
+        if not power or not power.get("present"):
+            self._pulse_t = 0.0
+            self._warn_t = 0.0
+            self._warn_low = False
+            self.update()
+            return
+
+        if prev and prev.get("present") and power["plugged"] and not prev["plugged"]:
+            # charger baru dicolok: pil berdenyut hijau sebentar
+            self._pulse_t = max(self._pulse_t, CHARGE_PULSE_SEC)
+            self._pulse_phase = 0.0
+            self._wake()
+
+        percent = power["percent"]
+        low = percent is not None and percent <= BATTERY_LOW
+        if low and not power["plugged"]:
+            if not self._warn_low:  # sekali per siklus pengosongan
+                self._warn_low = True
+                self._warn_t = BATTERY_WARN_SEC
+                self._pulse_t = max(self._pulse_t, 3.0)
+                self._pulse_phase = 0.0
+                self._peek()        # panel membesar supaya peringatannya terlihat
+                self._wake()
+        elif power["plugged"] or not low:
+            self._warn_low = False
+        self.update()
+
+    def _pulse_strength(self):
+        if self._pulse_t <= 0.0:
+            return 0.0
+        return 0.5 + 0.5 * math.sin(self._pulse_phase)
+
+    def _glow_state(self):
+        """(warna, kekuatan) pendaran pil: hijau saat charger, merah saat low."""
+        power = self._power or {}
+        if not power.get("present"):
+            return None, 0.0
+        pulse = self._pulse_strength()
+        pulsing = self._pulse_t > 0.0
+        if power.get("plugged"):
+            return CHARGE_COLOR, (0.45 + 0.55 * pulse) if pulsing else 0.32
+        if self._warn_low:
+            return LOW_COLOR, (0.4 + 0.6 * pulse) if pulsing else 0.0
+        return None, 0.0
+
+    def _advance_power(self, dt):
+        """Jalankan denyut; True kalau animasi masih berjalan."""
+        pulsing = False
+        if self._pulse_t > 0.0:
+            self._pulse_phase += dt * 5.4
+            self._pulse_t = max(0.0, self._pulse_t - dt)
+            pulsing = self._pulse_t > 0.0
+            if not pulsing:
+                self.update()  # sisa glow statis, tidak perlu 20 fps lagi
+        if self._warn_t > 0.0:
+            self._warn_t = max(0.0, self._warn_t - dt)
+            if self._warn_t == 0.0:
+                self.update()  # badge kembali ke tanggal & jam
+        return pulsing
+
     # ------------------------------------------------------------- animasi ---
     def _all_springs(self):
         return [
@@ -677,6 +1196,7 @@ class Notch(QWidget):
             self._glow,
             self._content,
             self._art_fade,
+            self._privacy_anim,
             *self._btn_hover,
         ]
 
@@ -710,6 +1230,7 @@ class Notch(QWidget):
 
         progress_live = self._advance_progress(dt)
         snap_moving = self._advance_snap(dt)
+        pulsing = self._advance_power(dt)
 
         if spring_moving or snap_moving:
             # bentuk pil berubah -> lukis ulang seluruhnya
@@ -722,6 +1243,10 @@ class Notch(QWidget):
             if m["t"] > 0.45:
                 self.update(m["dirty_progress"].toAlignedRect())
             interval = 16
+        elif pulsing:
+            # denyut baterai: 20 fps cukup untuk napas yang halus
+            self.update()
+            interval = 50
         else:
             interval = 100
         if self._timer.interval() != interval:
@@ -939,6 +1464,10 @@ class Notch(QWidget):
             "QMenu::item{padding:6px 22px; border-radius:6px;}"
             "QMenu::item:selected{background:#3A2C25;}"
         )
+        act_privacy = menu.addAction("Indikator mic/kamera")
+        act_privacy.setCheckable(True)
+        act_privacy.setChecked(self._privacy_on)
+        menu.addSeparator()
         act_quit = menu.addAction("Keluar")
         act_top = menu.addAction("Tempel ke atas (tengah)")
         chosen = menu.exec(event.globalPos())
@@ -947,6 +1476,12 @@ class Notch(QWidget):
         elif chosen == act_top:
             self._snap_to_top(center=True)
             self._wake()
+        elif chosen == act_privacy:
+            self._privacy_on = act_privacy.isChecked()
+            self._watch.set_enabled(self._privacy_on)
+            self._save_privacy_flag()
+            self._wake()
+            self.update()
         elif not self._hovered:
             self._collapse_timer.start(300)
 
@@ -974,6 +1509,7 @@ class Notch(QWidget):
         self._paint_shell(painter, m["pill"], m["radius"], m["ear_r"])
         self._paint_header(painter, m)
         self._paint_dots(painter, m)
+        self._paint_privacy(painter, m)
         self._paint_art(painter, m)
         self._paint_equalizer(painter, m)
         self._paint_text(painter, m)
@@ -1004,6 +1540,22 @@ class Notch(QWidget):
                 p.setBrush(QColor(222, 174, 126, alpha))
                 shadow = pill.adjusted(-grow, 0.0, grow, grow)
                 p.drawPath(self._pill_path(shadow, radius + grow, ear_r))
+
+        # Pendaran hijau saat charger dicolok (berdenyut 4 detik, lalu menetap
+        # tipis), atau merah saat baterai lemah.
+        tint, strength = self._glow_state()
+        if tint is not None and strength > 0.02:
+            for i in range(4, 0, -1):
+                grow = i * 3.0
+                alpha = int(16 * strength * (1.0 - i / 5.0))
+                if alpha <= 0:
+                    continue
+                p.setBrush(QColor(tint.red(), tint.green(), tint.blue(), alpha))
+                p.drawPath(
+                    self._pill_path(
+                        pill.adjusted(-grow, 0.0, grow, grow), radius + grow, ear_r
+                    )
+                )
 
         # Badan notch: gradasi coklat espresso / dark mocha elegan minimalis
         body = QLinearGradient(pill.topLeft(), pill.bottomLeft())
@@ -1047,6 +1599,11 @@ class Notch(QWidget):
         date_str = now.strftime("%a %d %b %Y")
         time_str = now.strftime("%H:%M")
 
+        power = self._power or {}
+        show_batt = bool(power.get("present"))
+        percent = power.get("percent")
+        warning = show_batt and self._warn_t > 0.0 and not power.get("plugged")
+
         date_font = QFont(self._font_family)
         date_font.setPixelSize(12)
         date_font.setWeight(QFont.Medium)
@@ -1057,49 +1614,59 @@ class Notch(QWidget):
         time_font.setWeight(QFont.Bold)
         fm_time = QFontMetrics(time_font)
 
-        w_date = fm_date.horizontalAdvance(date_str)
-        w_space = 7
-        w_time = fm_time.horizontalAdvance(time_str)
-        ring_size = 15.0
-        ring_gap = 9.0
+        # Saat baterai lemah, badge menampilkan peringatan menggantikan tanggal
+        if warning:
+            head_str = f"Baterai lemah {percent}%"
+            head_font = time_font
+        else:
+            head_str = date_str
+            head_font = date_font
+        w_head = QFontMetrics(head_font).horizontalAdvance(head_str)
+        w_time = 0 if warning else fm_time.horizontalAdvance(time_str)
+        w_space = 0 if warning else 7
 
-        # Tata letak baru: Badge Cincin + Tanggal & Jam di sisi KIRI ATAS
+        icon_w = 23.0 if show_batt else 0.0
+        icon_gap = 9.0 if show_batt else 0.0
+
+        # Badge kiri atas: ikon baterai + tanggal (atau peringatan) + jam
         badge_x = pill.left() + 24.0
-        content_w = ring_size + ring_gap + w_date + w_space + w_time
+        content_w = icon_w + icon_gap + w_head + (w_space + w_time if w_time else 0)
         badge_rect = QRectF(badge_x - 8.0, cy - 12.5, content_w + 16.0, 25.0)
-        p.setPen(QPen(QColor(235, 205, 175, 22), 1.0))
-        p.setBrush(QColor(255, 238, 220, 12))
+        if warning:
+            p.setPen(QPen(QColor(255, 106, 92, 70), 1.0))
+            p.setBrush(QColor(255, 82, 70, 20))
+        else:
+            p.setPen(QPen(QColor(235, 205, 175, 22), 1.0))
+            p.setBrush(QColor(255, 238, 220, 12))
         p.drawRoundedRect(badge_rect, 12.5, 12.5)
 
-        ring_rect = QRectF(badge_x, cy - ring_size / 2.0, ring_size, ring_size)
-        pen_bg = QPen(QColor(34, 68, 48), 2.8)
-        pen_bg.setCapStyle(Qt.FlatCap)
-        p.setBrush(Qt.NoBrush)
-        p.setPen(pen_bg)
-        p.drawEllipse(ring_rect)
+        if show_batt:
+            self._paint_battery(
+                p, badge_x, cy, power, self._pulse_strength() if self._pulse_t > 0 else 0.0
+            )
 
-        pen_fg = QPen(QColor(82, 214, 138), 2.8)
-        pen_fg.setCapStyle(Qt.RoundCap)
-        p.setPen(pen_fg)
-        p.drawArc(ring_rect, 90 * 16, -245 * 16)
-
-        text_x = ring_rect.right() + ring_gap
+        text_x = badge_x + icon_w + icon_gap
         text_h = 20.0
-        p.setPen(QColor(208, 190, 175, 245))
-        p.setFont(date_font)
+        p.setPen(
+            QColor(255, 132, 120, 250)
+            if warning
+            else QColor(208, 190, 175, 245)
+        )
+        p.setFont(head_font)
         p.drawText(
-            QRectF(text_x, cy - text_h / 2.0, w_date + 4, text_h),
+            QRectF(text_x, cy - text_h / 2.0, w_head + 4, text_h),
             Qt.AlignLeft | Qt.AlignVCenter,
-            date_str,
+            head_str,
         )
 
-        p.setPen(QColor(250, 243, 235, 252))
-        p.setFont(time_font)
-        p.drawText(
-            QRectF(text_x + w_date + w_space, cy - text_h / 2.0, w_time + 4, text_h),
-            Qt.AlignLeft | Qt.AlignVCenter,
-            time_str,
-        )
+        if w_time:
+            p.setPen(QColor(250, 243, 235, 252))
+            p.setFont(time_font)
+            p.drawText(
+                QRectF(text_x + w_head + w_space, cy - text_h / 2.0, w_time + 4, text_h),
+                Qt.AlignLeft | Qt.AlignVCenter,
+                time_str,
+            )
 
         # Garis pemisah tipis antara bar status atas dan dek utama
         div_y = pill.top() + 41.5
@@ -1111,6 +1678,76 @@ class Notch(QWidget):
         p.drawLine(QPointF(pill.left() + 24.0, div_y), QPointF(pill.right() - 24.0, div_y))
 
         p.restore()
+
+    def _paint_battery(self, p, x, cy, power, pulse=0.0):
+        """Ikon baterai sungguhan: badan + terminal + isi + petir saat mengisi."""
+        percent = power.get("percent")
+        plugged = bool(power.get("plugged"))
+        if plugged:
+            color = CHARGE_COLOR
+        elif percent is not None and percent <= BATTERY_LOW:
+            color = LOW_COLOR
+        elif percent is not None and percent <= 30:
+            color = MID_COLOR
+        else:
+            color = BATT_LEVEL_COLOR
+
+        h = 12.0
+        body = QRectF(x, cy - h / 2.0, 20.0, h)
+        nub = QRectF(body.right() + 0.5, cy - 2.2, 2.5, 4.4)
+
+        # Halo lembut saat berdenyut
+        if pulse > 0.02:
+            halo = QColor(color)
+            halo.setAlpha(int(62 * pulse))
+            p.setPen(Qt.NoPen)
+            p.setBrush(halo)
+            p.drawRoundedRect(body.adjusted(-3.2, -3.2, 3.2, 3.2), 6.5, 6.5)
+
+        p.setBrush(Qt.NoBrush)
+        p.setPen(QPen(QColor(color.red(), color.green(), color.blue(), 205), 1.3))
+        p.drawRoundedRect(body, 3.2, 3.2)
+
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(color.red(), color.green(), color.blue(), 190))
+        p.drawRoundedRect(nub, 1.0, 1.0)
+
+        inner = body.adjusted(2.4, 2.4, -2.4, -2.4)
+        frac = 1.0 if percent is None else clamp(percent / 100.0)
+        fill_w = inner.width() * frac
+        if fill_w > 0.6:
+            fill = QRectF(inner.left(), inner.top(), fill_w, inner.height())
+            grad = QLinearGradient(fill.topLeft(), fill.bottomLeft())
+            grad.setColorAt(
+                0.0,
+                QColor(
+                    min(255, color.red() + 28),
+                    min(255, color.green() + 28),
+                    min(255, color.blue() + 28),
+                    235,
+                ),
+            )
+            grad.setColorAt(1.0, QColor(color.red(), color.green(), color.blue(), 225))
+            p.setBrush(grad)
+            p.drawRoundedRect(fill, 1.4, 1.4)
+
+        if plugged:
+            # Petir terang: tetap terbaca di atas isi baterai (hijau) maupun di
+            # area kosong saat baterai masih rendah.
+            cx, cyy = body.center().x(), cy
+            bolt = QPolygonF(
+                [
+                    QPointF(cx + 1.7, cyy - 4.6),
+                    QPointF(cx - 2.6, cyy + 0.4),
+                    QPointF(cx - 0.3, cyy + 0.4),
+                    QPointF(cx - 1.3, cyy + 4.6),
+                    QPointF(cx + 2.8, cyy - 0.6),
+                    QPointF(cx + 0.5, cyy - 0.6),
+                ]
+            )
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(255, 247, 238, 246))
+            p.drawPolygon(bolt)
 
     def _paint_art(self, p, m):
         rect = m["art"]
@@ -1408,6 +2045,151 @@ class Notch(QWidget):
             x += dot_d + gap
 
         p.restore()
+
+    def _paint_privacy(self, p, m):
+        """Titik oranye/hijau: titik saja saat ringkas, titik + nama saat besar."""
+        anim = clamp(self._privacy_anim.value)
+        if anim <= 0.02:
+            return
+        items = self._privacy_items()
+        if not items:
+            return
+
+        devices = []
+        for item in items:
+            for device in item["devices"]:
+                if device not in devices:
+                    devices.append(device)
+        color_of = {"mic": MIC_COLOR, "cam": CAM_COLOR}
+
+        pill = m["pill"]
+        p.save()
+        p.setClipPath(self._pill_path(pill, m["radius"], m["ear_r"]))
+        p.setOpacity(anim)
+
+        # Ringkas: titik di ujung kanan pil, selalu kelihatan
+        dot_alpha = 1.0 - smoothstep(0.16, 0.48, m["t"])
+        if dot_alpha > 0.02:
+            diameter = 7.0 * (0.7 + 0.3 * anim)
+            gap = 5.0
+            total = len(devices) * diameter + (len(devices) - 1) * gap
+            x = pill.right() - 12.0 - total
+            cy = pill.center().y()
+            for device in devices:
+                self._privacy_dot(
+                    p, QPointF(x + diameter / 2.0, cy), diameter, color_of[device], dot_alpha
+                )
+                x += diameter + gap
+
+        # Membesar: kapsul kecil berisi titik + nama aplikasi
+        cap_alpha = smoothstep(0.5, 0.88, m["t"])
+        if cap_alpha > 0.02:
+            self._paint_privacy_capsule(p, m, items, color_of, cap_alpha)
+
+        p.restore()
+
+    def _paint_privacy_capsule(self, p, m, items, color_of, alpha):
+        pill = m["pill"]
+        cy = m["header_cy"]
+        h = 22.0
+
+        font = QFont(self._font_family)
+        font.setPixelSize(10)
+        font.setWeight(QFont.DemiBold)
+        fm = QFontMetrics(font)
+
+        pad_l = 9.0
+        pad_r = 9.0
+        dot_d = 7.0
+        dot_gap = 3.0
+        name_gap = 5.0
+        item_gap = 11.0
+
+        # Kanan: tepat di kiri kapsul equalizer (posisinya ikut beranimasi).
+        # Kiri: tepat di kanan titik-titik halaman, supaya tidak bertumpuk.
+        right_edge = m["eq"].left() - 8.0 - 9.0
+        left_edge = pill.center().x() + 71.0
+        avail = right_edge - left_edge
+        if avail < 48.0:  # pil belum cukup lebar (di tengah animasi)
+            return
+
+        def assemble(labels):
+            widths = []
+            for item, label in zip(items, labels):
+                w = len(item["devices"]) * dot_d + (len(item["devices"]) - 1) * dot_gap
+                if label:
+                    w += name_gap + fm.horizontalAdvance(label)
+                widths.append(w)
+            total = pad_l + pad_r + sum(widths) + (len(items) - 1) * item_gap
+            return widths, total
+
+        fixed = pad_l + pad_r + sum(
+            len(item["devices"]) * dot_d + (len(item["devices"]) - 1) * dot_gap
+            + name_gap
+            for item in items
+        ) + (len(items) - 1) * item_gap
+        budget = max(0.0, avail - fixed) / max(1, len(items))
+
+        labels = []
+        for item in items:
+            label = item["name"]
+            if budget < 26.0:
+                label = ""
+            elif fm.horizontalAdvance(label) > budget:
+                label = fm.elidedText(label, Qt.ElideRight, int(budget))
+            labels.append(label)
+
+        widths, content_w = assemble(labels)
+        if content_w > avail:
+            # belum ada ruang (di tengah animasi): tampilkan titiknya dulu
+            labels = [""] * len(items)
+            widths, content_w = assemble(labels)
+        if content_w <= 0:
+            return
+
+        tint = color_of[items[0]["devices"][0]]
+        x = right_edge - content_w
+        cap_rect = QRectF(x, cy - h / 2.0, content_w, h)
+        p.setPen(QPen(QColor(tint.red(), tint.green(), tint.blue(), int(48 * alpha)), 1.0))
+        p.setBrush(QColor(tint.red(), tint.green(), tint.blue(), int(18 * alpha)))
+        p.drawRoundedRect(cap_rect, h / 2.0, h / 2.0)
+
+        p.setFont(font)
+        cx = x + pad_l
+        for index, (item, label) in enumerate(zip(items, labels)):
+            if index:
+                cx += item_gap
+            for j, device in enumerate(item["devices"]):
+                if j:
+                    cx += dot_gap
+                self._privacy_dot(
+                    p, QPointF(cx + dot_d / 2.0, cy), dot_d, color_of[device], alpha
+                )
+                cx += dot_d
+            if label:
+                cx += name_gap
+                text_w = fm.horizontalAdvance(label)
+                p.setPen(QColor(250, 243, 235, int(240 * alpha)))
+                p.drawText(
+                    QRectF(cx, cy - h / 2.0, text_w + 2.0, h),
+                    Qt.AlignLeft | Qt.AlignVCenter,
+                    label,
+                )
+                cx += text_w
+
+    @staticmethod
+    def _privacy_dot(p, center, diameter, color, alpha=1.0):
+        """Titik dengan halo tipis supaya terbaca di panel gelap."""
+        r = max(0.5, diameter / 2.0)
+        p.setPen(Qt.NoPen)
+        halo = QColor(color)
+        halo.setAlpha(int(72 * alpha))
+        p.setBrush(halo)
+        p.drawEllipse(center, r * 1.8, r * 1.8)
+        core = QColor(color)
+        core.setAlpha(int(255 * alpha))
+        p.setBrush(core)
+        p.drawEllipse(center, r, r)
 
     @staticmethod
     def _icon_prev(p, c, scale=1.0):
